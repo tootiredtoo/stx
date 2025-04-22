@@ -1,0 +1,51 @@
+# ===== CMake build files =====
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ===== VSCode config =====
+.vscode/
+
+# ===== Compiled object files =====
+*.o
+*.obj
+*.lo
+*.la
+*.al
+*.libs
+
+# ===== Executables =====
+*.exe
+*.out
+*.app
+*.bin
+
+# ===== Static/Shared libraries =====
+*.lib
+*.a
+*.so
+*.dylib
+*.dll
+
+# ===== Logs and debug =====
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+*.dSYM/
+
+# ===== Test results =====
+test-results/
+*.gcda
+*.gcno
+*.gcov
+
+# ===== C++ specific =====
+*.pch
+*.pdb
+
+# ===== Key files =====
+keys/
