@@ -38,10 +38,9 @@ include_directories(
 # -------- Source Files --------
 set(SRC_FILES
   src/common.cpp
-  src/crypto.cpp
   src/files.cpp
   src/network/tcp_server.cpp
-  src/network/ssl_utils.cpp
+  src/crypto/ssl_utils.cpp
 )
 
 # -------- Core Static Library --------
