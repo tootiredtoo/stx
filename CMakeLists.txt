@@ -5,11 +5,25 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# To avoid DOWNLOAD_EXTRACT_TIMESTAMP warning
+cmake_policy(SET CMP0135 NEW)
+
 # Compiler warnings
 add_compile_options(-Wall -Wextra -Werror)
 
-# Find OpenSSL
-find_package(OpenSSL REQUIRED)
+# For OpenSSL and GoogleTest libs
+include(FetchContent)
+
+# OpenSSL
+FetchContent_Declare(
+  openssl
+  URL https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+)
+
+FetchContent_MakeAvailable(openssl)
+
+set(OPENSSL_INCLUDE_DIR ${openssl_SOURCE_DIR}/include)
+set(OPENSSL_CRYPTO_LIBRARY ${openssl_BINARY_DIR}/libcrypto.a)
 
 # Include directories
 include_directories(
@@ -26,9 +40,6 @@ set(SRC_FILES
 
 # Create static library from core files
 add_library(stx_core STATIC ${SRC_FILES})
-
-# Link OpenSSL to the core library
-target_link_libraries(stx_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
 # Executables
 add_executable(stx-rcv src/stx-rcv.cpp)
