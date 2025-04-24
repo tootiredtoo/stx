@@ -1,7 +1,5 @@
 #include "crypto/ssl_utils.hpp"
 #include <asio/ssl/context.hpp>
-#include <fstream>
-#include <iostream>
 
 namespace stx::crypto {
 
