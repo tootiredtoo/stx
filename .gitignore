@@ -50,3 +50,6 @@ test-results/
 # ===== Key files =====
 keys/
 certs/
+
+# ===== Data files =====
+*.dat
