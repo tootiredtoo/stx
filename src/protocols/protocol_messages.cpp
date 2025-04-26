@@ -49,8 +49,10 @@ std::string deserialize_string(const std::vector<uint8_t>& data, size_t& pos) {
 ServerHelloMessage::ServerHelloMessage(const crypto::Nonce& server_nonce)
     : server_nonce_(server_nonce) {}
 
-ClientHelloMessage::ClientHelloMessage(const crypto::Nonce& client_nonce)
-    : client_nonce_(client_nonce) {}
+// Updated for client ID support
+ClientHelloMessage::ClientHelloMessage(const std::string& client_id,
+                                       const crypto::Nonce& client_nonce)
+    : client_id_(client_id), client_nonce_(client_nonce) {}
 
 ClientAuthMessage::ClientAuthMessage(const crypto::Nonce& client_nonce,
                                      const crypto::Nonce& server_nonce,
@@ -86,18 +88,7 @@ void ServerHelloMessage::deserialize(const std::vector<uint8_t>& data) {
   std::copy(data.begin(), data.end(), server_nonce_.begin());
 }
 
-// ClientHelloMessage implementation
-std::vector<uint8_t> ClientHelloMessage::serialize() const {
-  std::vector<uint8_t> result(client_nonce_.begin(), client_nonce_.end());
-  return result;
-}
-
-void ClientHelloMessage::deserialize(const std::vector<uint8_t>& data) {
-  if (data.size() != client_nonce_.size()) {
-    throw std::runtime_error("Invalid ClientHelloMessage data size");
-  }
-  std::copy(data.begin(), data.end(), client_nonce_.begin());
-}
+// ClientHelloMessage implementation is now in the header file
 
 // ClientAuthMessage implementation
 std::vector<uint8_t> ClientAuthMessage::serialize() const {
@@ -430,10 +421,6 @@ std::unique_ptr<Message> create_message(MessageType type) {
       return std::make_unique<FileBlockMessage>();
     case MessageType::BLOCK_ACK:
       return std::make_unique<BlockAckMessage>();
-    case MessageType::ERROR_MSG:
-      // Handle error messages if defined in your protocol
-      // return std::make_unique<ErrorMessage>();
-      return nullptr;
     default:
       return nullptr;
   }

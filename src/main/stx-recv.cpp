@@ -14,6 +14,9 @@
 // Default listen port
 constexpr uint16_t DEFAULT_PORT = 12345;
 
+// Default keys directory
+const std::string DEFAULT_KEYS_DIR = "./client_keys";
+
 // Global flag for graceful shutdown
 std::atomic<bool> running(true);
 
@@ -25,11 +28,14 @@ void signal_handler(int signal) {
 }
 
 void print_usage(const char* program_name) {
-  std::cerr << "Usage: " << program_name << " --listen <port> --out <output_directory>"
-            << std::endl;
+  std::cerr << "Usage: " << program_name << " [options]" << std::endl;
+  std::cerr << "Options:" << std::endl;
   std::cerr << "  --listen <port>      - Port to listen on (default: " << DEFAULT_PORT << ")"
             << std::endl;
   std::cerr << "  --out <directory>    - Directory to save received files" << std::endl;
+  std::cerr << "  --keys <directory>   - Directory containing client keys (default: "
+            << DEFAULT_KEYS_DIR << ")" << std::endl;
+  std::cerr << "  --help               - Show this help message" << std::endl;
 }
 
 void handle_client(std::shared_ptr<asio::ip::tcp::socket> client_socket,
@@ -58,7 +64,8 @@ void handle_client(std::shared_ptr<asio::ip::tcp::socket> client_socket,
     return;
   }
 
-  std::cout << "Handshake successful with client " << client_ip << ":" << client_port << std::endl;
+  std::cout << "Handshake successful with client ID: " << session->client_id() << " (" << client_ip
+            << ":" << client_port << ")" << std::endl;
 
   // Receive the file
   bool receive_result = session->receive_file(output_dir);
@@ -67,8 +74,8 @@ void handle_client(std::shared_ptr<asio::ip::tcp::socket> client_socket,
   session->close();
 
   if (!receive_result) {
-    std::cerr << "Error: Failed to receive file from client " << client_ip << ":" << client_port
-              << std::endl;
+    std::cerr << "Error: Failed to receive file from client " << session->client_id() << " ("
+              << client_ip << ":" << client_port << ")" << std::endl;
   }
 }
 
@@ -86,6 +93,7 @@ int main(int argc, char* argv[]) {
   // Parse command line arguments
   uint16_t port = DEFAULT_PORT;
   std::string output_dir = ".";
+  std::string keys_dir = DEFAULT_KEYS_DIR;
 
   int i = 1;
   while (i < argc) {
@@ -96,7 +104,14 @@ int main(int argc, char* argv[]) {
     } else if (arg == "--out" && i + 1 < argc) {
       output_dir = argv[i + 1];
       i += 2;
+    } else if (arg == "--keys" && i + 1 < argc) {
+      keys_dir = argv[i + 1];
+      i += 2;
+    } else if (arg == "--help") {
+      print_usage(argv[0]);
+      return 0;
     } else {
+      std::cerr << "Unknown option: " << arg << std::endl;
       print_usage(argv[0]);
       return 1;
     }
@@ -111,6 +126,20 @@ int main(int argc, char* argv[]) {
       return 3;  // I/O error
     }
   }
+
+  // Ensure the keys directory exists
+  if (!std::filesystem::exists(keys_dir)) {
+    try {
+      std::filesystem::create_directories(keys_dir);
+    } catch (const std::filesystem::filesystem_error& e) {
+      std::cerr << "Error: Failed to create keys directory: " << e.what() << std::endl;
+      return 3;  // I/O error
+    }
+  }
+
+  // Set the client keys directory
+  stx::crypto::set_client_keys_directory(keys_dir);
+  std::cout << "Using client keys directory: " << keys_dir << std::endl;
 
   try {
     // Create Asio IO context

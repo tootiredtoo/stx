@@ -5,11 +5,13 @@
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace stx {
@@ -375,6 +377,90 @@ Key get_preshared_key() {
   std::cerr << std::dec << std::endl;
 
   return key;
+}
+
+// Cache of client keys to avoid reading from disk repeatedly
+static std::unordered_map<std::string, Key> client_key_cache;
+
+// Location of client keys
+static std::string client_keys_dir = "./client_keys";
+
+// Get a client's key by ID
+Key get_client_key(const std::string& client_id) {
+  // Check if key is already in cache
+  auto it = client_key_cache.find(client_id);
+  if (it != client_key_cache.end()) {
+    return it->second;
+  }
+
+  // Check environment variables first
+  std::string env_var_name = "STX_KEY_" + client_id;
+  const char* key_env = std::getenv(env_var_name.c_str());
+  if (key_env) {
+    std::string key_hex = key_env;
+    if (key_hex.length() == KEY_SIZE * 2) {  // Hex string should be twice the key size
+      Key key;
+      for (size_t i = 0; i < KEY_SIZE; ++i) {
+        std::string byte_str = key_hex.substr(i * 2, 2);
+        key[i] = static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16));
+      }
+
+      // Cache the key
+      client_key_cache[client_id] = key;
+      return key;
+    }
+  }
+
+  // Try to read from client key file
+  std::filesystem::path key_file_path =
+      std::filesystem::path(client_keys_dir) / (client_id + ".key");
+  if (std::filesystem::exists(key_file_path)) {
+    std::ifstream key_file(key_file_path, std::ios::binary);
+    if (key_file) {
+      Key key;
+      key_file.read(reinterpret_cast<char*>(key.data()), key.size());
+      if (key_file.gcount() == static_cast<std::streamsize>(key.size())) {
+        // Cache the key
+        client_key_cache[client_id] = key;
+        return key;
+      }
+    }
+  }
+
+  // If neither environment variable nor file is available, generate a random key
+  // This is mainly for testing purposes; in production, keys should be pre-shared
+  std::cerr << "Warning: No key found for client " << client_id
+            << ". Generating a random key for testing." << std::endl;
+
+  Key key = generate_key();
+
+  // Print the key in hex format for debugging
+  std::cerr << "Generated key for " << client_id << ": ";
+  for (auto byte : key) {
+    std::cerr << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+  }
+  std::cerr << std::dec << std::endl;
+
+  // Cache the key
+  client_key_cache[client_id] = key;
+
+  // Also save it to disk for future use
+  try {
+    std::filesystem::create_directories(client_keys_dir);
+    std::ofstream key_file(key_file_path, std::ios::binary);
+    if (key_file) {
+      key_file.write(reinterpret_cast<const char*>(key.data()), key.size());
+    }
+  } catch (const std::exception& e) {
+    std::cerr << "Error saving key file: " << e.what() << std::endl;
+  }
+
+  return key;
+}
+
+// Set the directory where client keys are stored
+void set_client_keys_directory(const std::string& dir) {
+  client_keys_dir = dir;
 }
 
 }  // namespace crypto

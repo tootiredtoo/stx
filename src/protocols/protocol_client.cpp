@@ -17,16 +17,24 @@ std::vector<uint8_t> read_from_socket(asio::ip::tcp::socket& socket, size_t leng
   size_t total_read = 0;
 
   while (total_read < length) {
-    asio::error_code ec;
-    size_t bytes_read =
-        socket.read_some(asio::buffer(buffer.data() + total_read, length - total_read), ec);
+    try {
+      asio::error_code ec;
+      size_t bytes_read =
+          asio::read(socket, asio::buffer(buffer.data() + total_read, length - total_read),
+                     asio::transfer_at_least(1), ec);
 
-    if (ec || bytes_read <= 0) {
-      throw std::runtime_error("Connection closed or error while reading: " +
-                               (ec ? ec.message() : "Connection closed"));
+      if (ec) {
+        throw std::runtime_error("Connection closed or error while reading: " + ec.message());
+      }
+
+      if (bytes_read == 0) {
+        throw std::runtime_error("Connection closed while reading");
+      }
+
+      total_read += bytes_read;
+    } catch (const std::exception& e) {
+      throw std::runtime_error(std::string("Error reading from socket: ") + e.what());
     }
-
-    total_read += bytes_read;
   }
 
   return buffer;
@@ -34,21 +42,33 @@ std::vector<uint8_t> read_from_socket(asio::ip::tcp::socket& socket, size_t leng
 
 // Helper function to write data to socket using Asio
 bool write_to_socket(asio::ip::tcp::socket& socket, const std::vector<uint8_t>& data) {
-  size_t total_sent = 0;
+  try {
+    size_t total_sent = 0;
 
-  while (total_sent < data.size()) {
-    asio::error_code ec;
-    size_t bytes_sent =
-        socket.write_some(asio::buffer(data.data() + total_sent, data.size() - total_sent), ec);
+    while (total_sent < data.size()) {
+      asio::error_code ec;
+      size_t bytes_sent =
+          asio::write(socket, asio::buffer(data.data() + total_sent, data.size() - total_sent),
+                      asio::transfer_at_least(1), ec);
 
-    if (ec || bytes_sent <= 0) {
-      return false;
+      if (ec) {
+        std::cerr << "Error writing to socket: " << ec.message() << std::endl;
+        return false;
+      }
+
+      if (bytes_sent == 0) {
+        std::cerr << "Connection closed while writing" << std::endl;
+        return false;
+      }
+
+      total_sent += bytes_sent;
     }
 
-    total_sent += bytes_sent;
+    return true;
+  } catch (const std::exception& e) {
+    std::cerr << "Error writing to socket: " << e.what() << std::endl;
+    return false;
   }
-
-  return true;
 }
 
 // ClientSession implementation
@@ -234,29 +254,46 @@ bool ClientSession::receive_file(const std::string& output_dir) {
   return false;
 }
 
-bool ClientSession::client_handshake() {
+bool ClientSession::client_handshake(const std::string& client_id) {
   try {
+    std::cout << "Starting client handshake for client " << client_id << "..." << std::endl;
+
+    // Store client ID
+    client_id_ = client_id;
+
     // Step 1: Receive Server Hello
+    std::cout << "Waiting for SERVER_HELLO..." << std::endl;
     auto server_hello_msg_ptr = receive_message();
-    if (!server_hello_msg_ptr || server_hello_msg_ptr->type() != MessageType::SERVER_HELLO) {
-      std::cerr << "Error: Expected SERVER_HELLO message" << std::endl;
+    if (!server_hello_msg_ptr) {
+      std::cerr << "Error: Failed to receive any message" << std::endl;
+      return false;
+    }
+
+    if (server_hello_msg_ptr->type() != MessageType::SERVER_HELLO) {
+      std::cerr << "Error: Expected SERVER_HELLO message, got message type: "
+                << static_cast<int>(server_hello_msg_ptr->type()) << std::endl;
       return false;
     }
 
     ServerHelloMessage* server_hello =
         dynamic_cast<ServerHelloMessage*>(server_hello_msg_ptr.get());
     crypto::Nonce server_nonce = server_hello->server_nonce();
+    std::cout << "Received SERVER_HELLO" << std::endl;
 
-    // Step 2: Send Client Hello
+    // Step 2: Send Client Hello with client ID
+    std::cout << "Sending CLIENT_HELLO with ID: " << client_id << std::endl;
     crypto::Nonce client_nonce = crypto::generate_nonce();
-    ClientHelloMessage client_hello(client_nonce);
+    ClientHelloMessage client_hello(client_id, client_nonce);
     if (!send_message(client_hello)) {
       std::cerr << "Error: Failed to send CLIENT_HELLO" << std::endl;
       return false;
     }
 
     // Step 3: Generate authentication data
-    crypto::Key preshared_key = crypto::get_preshared_key();
+    std::cout << "Generating authentication data..." << std::endl;
+
+    // Get client-specific key
+    crypto::Key client_key = crypto::get_client_key(client_id);
 
     // Combine nonces for auth data
     std::vector<uint8_t> auth_data;
@@ -264,10 +301,11 @@ bool ClientSession::client_handshake() {
     auth_data.insert(auth_data.end(), client_nonce.begin(), client_nonce.end());
     auth_data.insert(auth_data.end(), server_nonce.begin(), server_nonce.end());
 
-    // Compute HMAC
-    std::vector<uint8_t> client_hmac = crypto::compute_hmac(preshared_key, auth_data);
+    // Compute HMAC with client-specific key
+    std::vector<uint8_t> client_hmac = crypto::compute_hmac(client_key, auth_data);
 
     // Step 4: Send Client Auth
+    std::cout << "Sending CLIENT_AUTH..." << std::endl;
     ClientAuthMessage client_auth(client_nonce, server_nonce, client_hmac);
     if (!send_message(client_auth)) {
       std::cerr << "Error: Failed to send CLIENT_AUTH" << std::endl;
@@ -275,28 +313,39 @@ bool ClientSession::client_handshake() {
     }
 
     // Step 5: Receive Server Auth
+    std::cout << "Waiting for SERVER_AUTH..." << std::endl;
     auto server_auth_msg_ptr = receive_message();
-    if (!server_auth_msg_ptr || server_auth_msg_ptr->type() != MessageType::SERVER_AUTH) {
-      std::cerr << "Error: Expected SERVER_AUTH message" << std::endl;
+    if (!server_auth_msg_ptr) {
+      std::cerr << "Error: Failed to receive any message after CLIENT_AUTH" << std::endl;
+      return false;
+    }
+
+    if (server_auth_msg_ptr->type() != MessageType::SERVER_AUTH) {
+      std::cerr << "Error: Expected SERVER_AUTH message, got message type: "
+                << static_cast<int>(server_auth_msg_ptr->type()) << std::endl;
       return false;
     }
 
     ServerAuthMessage* server_auth = dynamic_cast<ServerAuthMessage*>(server_auth_msg_ptr.get());
+    std::cout << "Received SERVER_AUTH" << std::endl;
 
-    // Verify server's HMAC
-    if (!crypto::verify_hmac(preshared_key, auth_data, server_auth->hmac())) {
+    // Verify server's HMAC with client-specific key
+    if (!crypto::verify_hmac(client_key, auth_data, server_auth->hmac())) {
       std::cerr << "Error: Server authentication failed" << std::endl;
       return false;
     }
+    std::cout << "Server authentication successful" << std::endl;
 
     // Step 6: Derive session key
-    session_key_ = crypto::derive_session_key(preshared_key, client_nonce, server_nonce);
+    std::cout << "Deriving session key..." << std::endl;
+    session_key_ = crypto::derive_session_key(client_key, client_nonce, server_nonce);
 
     // Step 7: Generate session ID and initial IV
     session_id_ = crypto::generate_session_id();
     current_iv_ = crypto::generate_iv();
 
     // Step 8: Send Session Key
+    std::cout << "Sending SESSION_KEY..." << std::endl;
     SessionKeyMessage session_key_msg(session_id_, current_iv_);
     if (!send_message(session_key_msg)) {
       std::cerr << "Error: Failed to send SESSION_KEY" << std::endl;
@@ -304,10 +353,16 @@ bool ClientSession::client_handshake() {
     }
 
     // Step 9: Receive Session Confirm
+    std::cout << "Waiting for SESSION_CONFIRM..." << std::endl;
     auto session_confirm_msg_ptr = receive_message();
-    if (!session_confirm_msg_ptr ||
-        session_confirm_msg_ptr->type() != MessageType::SESSION_CONFIRM) {
-      std::cerr << "Error: Expected SESSION_CONFIRM message" << std::endl;
+    if (!session_confirm_msg_ptr) {
+      std::cerr << "Error: Failed to receive any message after SESSION_KEY" << std::endl;
+      return false;
+    }
+
+    if (session_confirm_msg_ptr->type() != MessageType::SESSION_CONFIRM) {
+      std::cerr << "Error: Expected SESSION_CONFIRM message, got message type: "
+                << static_cast<int>(session_confirm_msg_ptr->type()) << std::endl;
       return false;
     }
 
@@ -319,6 +374,7 @@ bool ClientSession::client_handshake() {
     }
 
     // Handshake successful
+    std::cout << "Handshake completed successfully for client " << client_id << std::endl;
     active_ = true;
     return true;
 
@@ -409,15 +465,26 @@ std::vector<uint8_t> ClientSession::receive_and_decrypt() {
 std::unique_ptr<ClientSession> create_client_session(const std::string& host, uint16_t port) {
   try {
     // Create IO context
-    asio::io_context io_context;
+    auto io_context = std::make_shared<asio::io_context>();
 
     // Resolve endpoint
-    asio::ip::tcp::resolver resolver(io_context);
+    asio::ip::tcp::resolver resolver(*io_context);
     asio::ip::tcp::resolver::results_type endpoints = resolver.resolve(host, std::to_string(port));
 
     // Create and connect socket
-    auto socket = std::make_shared<asio::ip::tcp::socket>(io_context);
+    auto socket = std::make_shared<asio::ip::tcp::socket>(*io_context);
     asio::connect(*socket, endpoints);
+
+    // Run the io_context in the background to keep it alive
+    // This is needed for asynchronous operations
+    std::thread([io_ptr = io_context]() {
+      asio::io_context::work work(*io_ptr);
+      try {
+        io_ptr->run();
+      } catch (const std::exception& e) {
+        std::cerr << "IO context error: " << e.what() << std::endl;
+      }
+    }).detach();
 
     // Create client session
     return std::make_unique<ClientSession>(socket);

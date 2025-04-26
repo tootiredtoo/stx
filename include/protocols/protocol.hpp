@@ -53,8 +53,8 @@ class ClientSession {
   bool receive_file(const std::string& output_dir);
 
   // Handshake functions
-  bool client_handshake();
-  bool server_handshake();
+  bool client_handshake(const std::string& client_id);
+  bool server_handshake();  // Not used by clients
 
   // Session management
   void close();
@@ -64,16 +64,17 @@ class ClientSession {
   bool encrypt_and_send(const std::vector<uint8_t>& data);
   std::vector<uint8_t> receive_and_decrypt();
 
+  // Get client ID
+  const std::string& client_id() const { return client_id_; }
+
  private:
   std::shared_ptr<asio::ip::tcp::socket> socket_;
   bool active_;
+  std::string client_id_;
   crypto::SessionId session_id_;
   crypto::Key session_key_;
   crypto::IV current_iv_;
 };
-
-// Factory function to create a client session
-std::unique_ptr<ClientSession> create_client_session(const std::string& host, uint16_t port);
 
 // Message factory function
 std::unique_ptr<Message> create_message(MessageType type);
@@ -121,15 +122,61 @@ class ServerHelloMessage : public Message {
 class ClientHelloMessage : public Message {
  public:
   ClientHelloMessage() = default;
-  explicit ClientHelloMessage(const crypto::Nonce& client_nonce);
+  ClientHelloMessage(const std::string& client_id, const crypto::Nonce& client_nonce);
 
   MessageType type() const override { return MessageType::CLIENT_HELLO; }
-  std::vector<uint8_t> serialize() const override;
-  void deserialize(const std::vector<uint8_t>& data) override;
 
+  std::vector<uint8_t> serialize() const override {
+    std::vector<uint8_t> result;
+
+    // Add client ID (string length + string content)
+    uint32_t id_length = static_cast<uint32_t>(client_id_.length());
+    result.push_back((id_length >> 24) & 0xFF);
+    result.push_back((id_length >> 16) & 0xFF);
+    result.push_back((id_length >> 8) & 0xFF);
+    result.push_back(id_length & 0xFF);
+    result.insert(result.end(), client_id_.begin(), client_id_.end());
+
+    // Add client nonce
+    result.insert(result.end(), client_nonce_.begin(), client_nonce_.end());
+
+    return result;
+  }
+
+  void deserialize(const std::vector<uint8_t>& data) override {
+    if (data.size() < 4) {
+      throw std::runtime_error("Invalid ClientHelloMessage data size");
+    }
+
+    size_t pos = 0;
+
+    // Extract client ID length
+    uint32_t id_length =
+        (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) |
+        (static_cast<uint32_t>(data[pos + 2]) << 8) | static_cast<uint32_t>(data[pos + 3]);
+    pos += 4;
+
+    if (pos + id_length > data.size()) {
+      throw std::runtime_error("Invalid client ID length in ClientHelloMessage");
+    }
+
+    // Extract client ID
+    client_id_ = std::string(data.begin() + pos, data.begin() + pos + id_length);
+    pos += id_length;
+
+    // Extract client nonce
+    if (pos + client_nonce_.size() > data.size()) {
+      throw std::runtime_error("Invalid data size for client nonce in ClientHelloMessage");
+    }
+
+    std::copy(data.begin() + pos, data.begin() + pos + client_nonce_.size(), client_nonce_.begin());
+  }
+
+  const std::string& client_id() const { return client_id_; }
   const crypto::Nonce& client_nonce() const { return client_nonce_; }
 
  private:
+  std::string client_id_;
   crypto::Nonce client_nonce_;
 };
 
@@ -273,7 +320,7 @@ class ServerSession {
   bool receive_file(const std::string& output_dir);
 
   // Handshake functions
-  bool client_handshake();
+  bool client_handshake();  // Not used by servers
   bool server_handshake();
 
   // Session management
@@ -284,9 +331,13 @@ class ServerSession {
   bool encrypt_and_send(const std::vector<uint8_t>& data);
   std::vector<uint8_t> receive_and_decrypt();
 
+  // Get client ID
+  const std::string& client_id() const { return client_id_; }
+
  private:
   std::shared_ptr<asio::ip::tcp::socket> socket_;
   bool active_;
+  std::string client_id_;
   crypto::SessionId session_id_;
   crypto::Key session_key_;
   crypto::IV current_iv_;

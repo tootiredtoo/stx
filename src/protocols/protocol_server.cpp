@@ -247,61 +247,117 @@ bool ServerSession::client_handshake() {
 
 bool ServerSession::server_handshake() {
   try {
+    std::cout << "Starting server handshake..." << std::endl;
+
     // Step 1: Generate server nonce
+    std::cout << "Generating server nonce..." << std::endl;
     crypto::Nonce server_nonce = crypto::generate_nonce();
 
     // Step 2: Send Server Hello
+    std::cout << "Sending SERVER_HELLO..." << std::endl;
     ServerHelloMessage server_hello(server_nonce);
     if (!send_message(server_hello)) {
       std::cerr << "Error: Failed to send SERVER_HELLO" << std::endl;
       return false;
     }
 
-    // Step 3: Receive Client Hello
+    // Step 3: Receive Client Hello with client ID
+    std::cout << "Waiting for CLIENT_HELLO..." << std::endl;
     auto client_hello_msg_ptr = receive_message();
-    if (!client_hello_msg_ptr || client_hello_msg_ptr->type() != MessageType::CLIENT_HELLO) {
-      std::cerr << "Error: Expected CLIENT_HELLO message" << std::endl;
+    if (!client_hello_msg_ptr) {
+      std::cerr << "Error: Failed to receive any message" << std::endl;
+      return false;
+    }
+
+    if (client_hello_msg_ptr->type() != MessageType::CLIENT_HELLO) {
+      std::cerr << "Error: Expected CLIENT_HELLO message, got message type: "
+                << static_cast<int>(client_hello_msg_ptr->type()) << std::endl;
       return false;
     }
 
     ClientHelloMessage* client_hello =
         dynamic_cast<ClientHelloMessage*>(client_hello_msg_ptr.get());
+
+    // Get client ID and nonce
+    std::string client_id = client_hello->client_id();
     crypto::Nonce client_nonce = client_hello->client_nonce();
 
+    std::cout << "Received CLIENT_HELLO from client: " << client_id << std::endl;
+
+    // Store client ID for later use
+    client_id_ = client_id;
+
     // Step 4: Receive Client Auth
+    std::cout << "Waiting for CLIENT_AUTH..." << std::endl;
     auto client_auth_msg_ptr = receive_message();
-    if (!client_auth_msg_ptr || client_auth_msg_ptr->type() != MessageType::CLIENT_AUTH) {
-      std::cerr << "Error: Expected CLIENT_AUTH message" << std::endl;
+    if (!client_auth_msg_ptr) {
+      std::cerr << "Error: Failed to receive any message after CLIENT_HELLO" << std::endl;
+      return false;
+    }
+
+    if (client_auth_msg_ptr->type() != MessageType::CLIENT_AUTH) {
+      std::cerr << "Error: Expected CLIENT_AUTH message, got message type: "
+                << static_cast<int>(client_auth_msg_ptr->type()) << std::endl;
       return false;
     }
 
     ClientAuthMessage* client_auth = dynamic_cast<ClientAuthMessage*>(client_auth_msg_ptr.get());
+    std::cout << "Received CLIENT_AUTH" << std::endl;
 
     // Step 5: Verify client's nonces match
-    if (client_nonce != client_auth->client_nonce() ||
-        server_nonce != client_auth->server_nonce()) {
-      std::cerr << "Error: Nonce mismatch in client authentication" << std::endl;
+    std::cout << "Verifying client nonces..." << std::endl;
+    if (client_nonce != client_auth->client_nonce()) {
+      std::cerr << "Error: Client nonce mismatch in client authentication" << std::endl;
       return false;
     }
 
-    // Step 6: Get pre-shared key
-    crypto::Key preshared_key = crypto::get_preshared_key();
+    if (server_nonce != client_auth->server_nonce()) {
+      std::cerr << "Error: Server nonce mismatch in client authentication" << std::endl;
+      return false;
+    }
 
-    // Step 7: Verify client's HMAC
+    // Step 6: Get client-specific pre-shared key
+    std::cout << "Getting key for client: " << client_id << std::endl;
+    crypto::Key client_key = crypto::get_client_key(client_id);
+
+    // Step 7: Verify client's HMAC with client-specific key
+    std::cout << "Verifying client's HMAC..." << std::endl;
     std::vector<uint8_t> auth_data;
     auth_data.reserve(client_nonce.size() + server_nonce.size());
     auth_data.insert(auth_data.end(), client_nonce.begin(), client_nonce.end());
     auth_data.insert(auth_data.end(), server_nonce.begin(), server_nonce.end());
 
-    if (!crypto::verify_hmac(preshared_key, auth_data, client_auth->hmac())) {
-      std::cerr << "Error: Client authentication failed" << std::endl;
+    if (!crypto::verify_hmac(client_key, auth_data, client_auth->hmac())) {
+      std::cerr << "Error: Client authentication failed for client " << client_id << std::endl;
+
+      // For debugging - print the keys
+      std::stringstream ss;
+      ss << "Client HMAC: ";
+      for (auto b : client_auth->hmac()) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+      }
+      std::cerr << ss.str() << std::endl;
+
+      // Compute what we think the HMAC should be
+      std::vector<uint8_t> computed_hmac = crypto::compute_hmac(client_key, auth_data);
+      ss.str("");
+      ss << "Server computed HMAC: ";
+      for (auto b : computed_hmac) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+      }
+      std::cerr << ss.str() << std::endl;
+
       return false;
     }
 
+    std::cout << "Client " << client_id << " authenticated successfully" << std::endl;
+
     // Step 8: Generate server's HMAC
-    std::vector<uint8_t> server_hmac = crypto::compute_hmac(preshared_key, auth_data);
+    std::cout << "Generating server HMAC..." << std::endl;
+    std::vector<uint8_t> server_hmac = crypto::compute_hmac(client_key, auth_data);
 
     // Step 9: Send Server Auth
+    std::cout << "Sending SERVER_AUTH..." << std::endl;
     ServerAuthMessage server_auth(server_hmac);
     if (!send_message(server_auth)) {
       std::cerr << "Error: Failed to send SERVER_AUTH" << std::endl;
@@ -309,23 +365,34 @@ bool ServerSession::server_handshake() {
     }
 
     // Step 10: Receive Session Key
+    std::cout << "Waiting for SESSION_KEY..." << std::endl;
     auto session_key_msg_ptr = receive_message();
-    if (!session_key_msg_ptr || session_key_msg_ptr->type() != MessageType::SESSION_KEY) {
-      std::cerr << "Error: Expected SESSION_KEY message" << std::endl;
+    if (!session_key_msg_ptr) {
+      std::cerr << "Error: Failed to receive any message after SERVER_AUTH" << std::endl;
+      return false;
+    }
+
+    if (session_key_msg_ptr->type() != MessageType::SESSION_KEY) {
+      std::cerr << "Error: Expected SESSION_KEY message, got message type: "
+                << static_cast<int>(session_key_msg_ptr->type()) << std::endl;
       return false;
     }
 
     SessionKeyMessage* session_key_msg =
         dynamic_cast<SessionKeyMessage*>(session_key_msg_ptr.get());
+    std::cout << "Received SESSION_KEY" << std::endl;
 
     // Step 11: Store session information
+    std::cout << "Storing session information..." << std::endl;
     session_id_ = session_key_msg->session_id();
     current_iv_ = session_key_msg->iv();
 
     // Step 12: Derive session key
-    session_key_ = crypto::derive_session_key(preshared_key, client_nonce, server_nonce);
+    std::cout << "Deriving session key..." << std::endl;
+    session_key_ = crypto::derive_session_key(client_key, client_nonce, server_nonce);
 
     // Step 13: Send Session Confirm
+    std::cout << "Sending SESSION_CONFIRM..." << std::endl;
     SessionConfirmMessage session_confirm(true);
     if (!send_message(session_confirm)) {
       std::cerr << "Error: Failed to send SESSION_CONFIRM" << std::endl;
@@ -333,6 +400,7 @@ bool ServerSession::server_handshake() {
     }
 
     // Handshake successful
+    std::cout << "Handshake completed successfully with client " << client_id << std::endl;
     active_ = true;
     return true;
 
@@ -431,11 +499,21 @@ std::vector<uint8_t> ServerSession::receive_and_decrypt() {
 std::shared_ptr<asio::ip::tcp::acceptor> create_server_acceptor(uint16_t port) {
   try {
     // Create IO context
-    static asio::io_context io_context;
+    auto io_context = std::make_shared<asio::io_context>();
 
     // Create acceptor
     auto acceptor = std::make_shared<asio::ip::tcp::acceptor>(
-        io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port));
+        *io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port));
+
+    // Run the io_context in the background to keep it alive
+    std::thread([io_ptr = io_context]() {
+      asio::io_context::work work(*io_ptr);
+      try {
+        io_ptr->run();
+      } catch (const std::exception& e) {
+        std::cerr << "IO context error: " << e.what() << std::endl;
+      }
+    }).detach();
 
     std::cout << "Server listening on port " << port << std::endl;
     return acceptor;

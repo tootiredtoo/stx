@@ -51,11 +51,6 @@ FetchContent_MakeAvailable(asio)
 # -------- OpenSSL --------
 find_package(OpenSSL 3.0 REQUIRED)
 
-# Disable deprecated warnings as error for OpenSSL
-# if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-#   add_compile_options(-Wno-error=deprecated-declarations)
-# endif()
-
 # -------- Threads --------
 find_package(Threads REQUIRED)
 

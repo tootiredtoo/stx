@@ -47,9 +47,8 @@ test-results/
 *.pch
 *.pdb
 
-# ===== Key files =====
-keys/
-certs/
-
-# ===== Data files =====
-*.dat
+# ===== Generated files =====
+recv_files/
+*.txt
+*.key
+*.bin

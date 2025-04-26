@@ -17,12 +17,18 @@ constexpr int MAX_RETRIES = 5;
 // Retry delay in milliseconds
 constexpr int RETRY_DELAY_MS = 1000;
 
+// Default client ID
+const std::string DEFAULT_CLIENT_ID = "default";
+
 void print_usage(const char* program_name) {
-  std::cerr << "Usage: " << program_name << " <host> <port> <file_path> [block_size]" << std::endl;
-  std::cerr << "  host      - Hostname or IP address of the receiver" << std::endl;
-  std::cerr << "  port      - Port number of the receiver" << std::endl;
-  std::cerr << "  file_path - Path to the file to send" << std::endl;
-  std::cerr << "  block_size - Optional: Size of blocks for transfer (default: "
+  std::cerr << "Usage: " << program_name
+            << " [--id CLIENT_ID] <host> <port> <file_path> [block_size]" << std::endl;
+  std::cerr << "  --id CLIENT_ID - Client identifier for authentication (default: "
+            << DEFAULT_CLIENT_ID << ")" << std::endl;
+  std::cerr << "  host          - Hostname or IP address of the receiver" << std::endl;
+  std::cerr << "  port          - Port number of the receiver" << std::endl;
+  std::cerr << "  file_path     - Path to the file to send" << std::endl;
+  std::cerr << "  block_size    - Optional: Size of blocks for transfer (default: "
             << DEFAULT_BLOCK_SIZE << " bytes)" << std::endl;
 }
 
@@ -34,18 +40,38 @@ int main(int argc, char* argv[]) {
   }
 
   // Parse command line arguments
-  if (argc < 4) {
+  std::string client_id = DEFAULT_CLIENT_ID;
+  std::string host;
+  uint16_t port;
+  std::string file_path;
+  uint32_t block_size = DEFAULT_BLOCK_SIZE;
+
+  int arg_index = 1;
+
+  // Check for client ID parameter
+  if (arg_index < argc && std::string(argv[arg_index]) == "--id") {
+    if (arg_index + 1 >= argc) {
+      std::cerr << "Error: Missing CLIENT_ID after --id" << std::endl;
+      print_usage(argv[0]);
+      return 1;
+    }
+    client_id = argv[arg_index + 1];
+    arg_index += 2;
+  }
+
+  // Check for required arguments
+  if (argc - arg_index < 3) {
     print_usage(argv[0]);
     return 1;
   }
 
-  const std::string host = argv[1];
-  const uint16_t port = static_cast<uint16_t>(std::stoi(argv[2]));
-  const std::string file_path = argv[3];
+  host = argv[arg_index++];
+  port = static_cast<uint16_t>(std::stoi(argv[arg_index++]));
+  file_path = argv[arg_index++];
 
-  uint32_t block_size = DEFAULT_BLOCK_SIZE;
-  if (argc > 4) {
-    block_size = static_cast<uint32_t>(std::stoul(argv[4]));
+  // Optional block size
+  if (arg_index < argc) {
+    block_size = static_cast<uint32_t>(std::stoul(argv[arg_index++]));
   }
 
   // Check if the file exists and is readable
@@ -57,6 +83,7 @@ int main(int argc, char* argv[]) {
   // Get file size
   std::uintmax_t file_size = std::filesystem::file_size(file_path);
 
+  std::cout << "Client ID: " << client_id << std::endl;
   std::cout << "Sending file: " << file_path << std::endl;
   std::cout << "File size: " << file_size << " bytes" << std::endl;
   std::cout << "Block size: " << block_size << " bytes" << std::endl;
@@ -94,9 +121,9 @@ int main(int argc, char* argv[]) {
     return 1;  // Network error
   }
 
-  // Perform the handshake
-  std::cout << "Performing handshake..." << std::endl;
-  if (!session->client_handshake()) {
+  // Perform the handshake with client ID
+  std::cout << "Performing handshake for client ID: " << client_id << "..." << std::endl;
+  if (!session->client_handshake(client_id)) {
     std::cerr << "Error: Handshake failed" << std::endl;
     session->close();
     return 2;  // Authentication error

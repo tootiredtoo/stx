@@ -1,4 +1,3 @@
-// include/stx/crypto.h
 #pragma once
 
 #include <array>
@@ -63,6 +62,12 @@ uint32_t calculate_crc32(const std::vector<uint8_t>& data);
 
 // Read pre-shared key from file or environment
 Key get_preshared_key();
+
+// Get a client's key by ID
+Key get_client_key(const std::string& client_id);
+
+// Set the directory where client keys are stored
+void set_client_keys_directory(const std::string& dir);
 
 }  // namespace crypto
 }  // namespace stx
