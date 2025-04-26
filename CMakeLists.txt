@@ -25,8 +25,6 @@ include(FetchContent)
 # Define core library source files
 set(STX_CORE_SOURCES
     src/crypto/crypto.cpp
-    src/crypto/ssl_utils.cpp
-    src/network/tcp_server.cpp
     src/protocols/protocol_client.cpp
     src/protocols/protocol_messages.cpp
     src/protocols/protocol_server.cpp
@@ -35,8 +33,6 @@ set(STX_CORE_SOURCES
 # Header files
 set(STX_CORE_HEADERS
     include/crypto/crypto.hpp
-    include/crypto/ssl_utils.hpp
-    include/network/tcp_server.hpp
     include/protocols/protocol.hpp
 )
 
