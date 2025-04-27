@@ -11,7 +11,7 @@ This script:
 6. Verifies the file was transferred correctly using SHA-256 checksums
 
 Usage:
-    python disconnect_test.py
+    python solution_disconnects.py
 """
 
 import os
@@ -23,13 +23,15 @@ import shutil
 import signal
 import argparse
 import random
+import threading
+import glob
 from pathlib import Path
 
 # Default settings
 DEFAULT_PORT = 12345
-DEFAULT_FILE_SIZE_MB = 5
+DEFAULT_FILE_SIZE_MB = 10
 TEST_FILE_NAME = "test_data.bin"
-DEFAULT_INTERRUPTIONS = 2
+DEFAULT_INTERRUPTIONS = 8
 DEFAULT_MIN_WAIT_SEC = 1
 DEFAULT_MAX_WAIT_SEC = 3
 
@@ -71,19 +73,58 @@ def generate_test_file(file_path, size_mb):
     
     print(f"Test file generated: {file_path}")
 
+def run_process_with_timeout(cmd, timeout=60):
+    """Run a process with timeout and return its output."""
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
+    )
+    
+    stdout_data = []
+    stderr_data = []
+    
+    def read_output(pipe, data_list):
+        for line in iter(pipe.readline, ''):
+            data_list.append(line)
+            print(line, end='')  # Print output in real-time
+    
+    # Start threads to read stdout and stderr
+    stdout_thread = threading.Thread(target=read_output, args=(process.stdout, stdout_data))
+    stderr_thread = threading.Thread(target=read_output, args=(process.stderr, stderr_data))
+    stdout_thread.daemon = True
+    stderr_thread.daemon = True
+    stdout_thread.start()
+    stderr_thread.start()
+    
+    # Wait for the process to complete or timeout
+    try:
+        returncode = process.wait(timeout=timeout)
+        # Wait a bit longer for threads to finish reading output
+        stdout_thread.join(1)
+        stderr_thread.join(1)
+        return returncode, ''.join(stdout_data), ''.join(stderr_data)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return None, ''.join(stdout_data), ''.join(stderr_data)
+
 def run_sender_with_interruptions(source_file, port, num_interruptions, min_wait_sec, max_wait_sec):
     """Run the sender with simulated interruptions."""
+    sender_cmd = ['./build/bin/stx-send', 'localhost', str(port), source_file]
+    
     for i in range(num_interruptions + 1):
-        print(f"Starting stx-send attempt {i+1} of {num_interruptions+1}...")
-        
-        # Start the sender
-        sender_process = subprocess.Popen(
-            ['./build/bin/stx-send', 'localhost', str(port), source_file],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
+        print(f"\n==== Starting stx-send attempt {i+1} of {num_interruptions+1} ====")
         
         if i < num_interruptions:
+            # For interruptions, start the sender in a subprocess we can kill
+            sender_process = subprocess.Popen(
+                sender_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
             # Wait for a random amount of time before interrupting
             wait_time = random.uniform(min_wait_sec, max_wait_sec)
             print(f"Will interrupt after {wait_time:.2f} seconds...")
@@ -92,40 +133,54 @@ def run_sender_with_interruptions(source_file, port, num_interruptions, min_wait
             # Interrupt the transfer
             print("Interrupting transfer...")
             if sys.platform == 'win32':
-                # Windows
                 sender_process.terminate()
             else:
-                # Linux/macOS
                 sender_process.send_signal(signal.SIGINT)
             
-            # Wait for the process to exit
-            sender_process.wait(timeout=5)
-            
-            # Print process output
-            stdout, stderr = sender_process.communicate()
-            if stdout:
-                print("Sender stdout:", stdout.decode())
-            if stderr:
-                print("Sender stderr:", stderr.decode())
+            try:
+                stdout, stderr = sender_process.communicate(timeout=5)
+                if stdout:
+                    print(f"Interrupted stdout: {stdout.decode()}")
+                if stderr:
+                    print(f"Interrupted stderr: {stderr.decode()}")
+            except subprocess.TimeoutExpired:
+                print("Warning: Sender not responding to interrupt, killing...")
+                sender_process.kill()
+                stdout, stderr = sender_process.communicate()
             
             # Wait before trying again
             time.sleep(1)
         else:
-            # Last attempt - wait for completion
-            sender_process.wait()
-            stdout, stderr = sender_process.communicate()
+            # For the final attempt, use our timeout function
+            print("Starting final transfer attempt...")
+            print(f"Running command: {' '.join(sender_cmd)}")
             
-            print("Final sender output:")
-            if stdout:
-                print(stdout.decode())
+            returncode, stdout, stderr = run_process_with_timeout(sender_cmd, timeout=120)
             
-            if sender_process.returncode != 0:
-                print(f"Error: Final sender process failed with code {sender_process.returncode}")
-                if stderr:
-                    print("Stderr:", stderr.decode())
+            if returncode is None:
+                print("ERROR: Final transfer timed out after 120 seconds")
                 return False
+            
+            if returncode != 0:
+                print(f"ERROR: Final transfer failed with return code {returncode}")
+                print(f"stderr: {stderr}")
+                return False
+            
+            print("Final transfer completed successfully")
     
     return True
+
+def find_latest_file(directory, base_name=None):
+    """Find the most recently created file in the directory, optionally matching base name."""
+    pattern = os.path.join(directory, f"{base_name}*" if base_name else "*")
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    
+    # Get the most recently created file
+    latest_file = max(files, key=os.path.getctime)
+    print(f"Found latest file: {latest_file}")
+    return latest_file
 
 def main():
     parser = argparse.ArgumentParser(description='Test STX file transfer with disconnections.')
@@ -158,13 +213,34 @@ def main():
     source_hash = calculate_sha256(source_file)
     print(f"Source file SHA-256: {source_hash}")
     
-    # Start the receiver in the background
-    print(f"Starting stx-recv on port {port}, saving files to {recv_dir}...")
+    # Clear any previous received files that might confuse our test
+    for old_file in glob.glob(os.path.join(recv_dir, f"{TEST_FILE_NAME}*")):
+        print(f"Removing old file: {old_file}")
+        os.remove(old_file)
+    
+    # Start the receiver in the background with real-time output processing
+    recv_cmd = ['./build/bin/stx-recv', '--listen', str(port), '--out', recv_dir]
+    print(f"Starting receiver: {' '.join(recv_cmd)}")
+    
     recv_process = subprocess.Popen(
-        ['./build/bin/stx-recv', '--listen', str(port), '--out', recv_dir],
+        recv_cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1
     )
+    
+    # Set up threads to read receiver output in real time
+    def print_output(pipe, prefix):
+        for line in iter(pipe.readline, ''):
+            print(f"{prefix}: {line}", end='')
+    
+    recv_stdout_thread = threading.Thread(target=print_output, args=(recv_process.stdout, "RECV"))
+    recv_stderr_thread = threading.Thread(target=print_output, args=(recv_process.stderr, "RECV ERR"))
+    recv_stdout_thread.daemon = True
+    recv_stderr_thread.daemon = True
+    recv_stdout_thread.start()
+    recv_stderr_thread.start()
     
     # Give the receiver time to start
     time.sleep(2)
@@ -182,9 +258,10 @@ def main():
         # Give the receiver time to finish processing
         time.sleep(2)
         
-        # Verify the received file
-        received_file = os.path.join(recv_dir, TEST_FILE_NAME)
-        if os.path.exists(received_file):
+        # Find the latest received file that matches our test file name
+        received_file = find_latest_file(recv_dir, TEST_FILE_NAME)
+        
+        if received_file and os.path.exists(received_file):
             received_hash = calculate_sha256(received_file)
             print(f"Received file SHA-256: {received_hash}")
             
@@ -192,30 +269,43 @@ def main():
                 print("SUCCESS: Files match!")
             else:
                 print("ERROR: Files do not match!")
+                
+                # Show file sizes for debugging
+                source_size = os.path.getsize(source_file)
+                received_size = os.path.getsize(received_file)
+                print(f"Source file size: {source_size} bytes")
+                print(f"Received file size: {received_size} bytes")
+                
+                # Compare the first few bytes
+                with open(source_file, 'rb') as f1, open(received_file, 'rb') as f2:
+                    source_start = f1.read(100)
+                    received_start = f2.read(100)
+                    if source_start != received_start:
+                        print("First bytes differ!")
+                
                 sys.exit(1)
         else:
-            print(f"ERROR: Received file not found at {received_file}")
+            print(f"ERROR: Received file not found in {recv_dir}")
+            print("Files in directory:")
+            for f in os.listdir(recv_dir):
+                print(f"  {f}")
             sys.exit(1)
     
     finally:
         # Terminate the receiver
         print("Terminating receiver...")
         if sys.platform == 'win32':
-            # Windows
             recv_process.terminate()
         else:
-            # Linux/macOS
             recv_process.send_signal(signal.SIGINT)
         
-        # Wait for the receiver to exit
-        recv_process.wait(timeout=5)
-        
-        # Print receiver output
-        recv_stdout, recv_stderr = recv_process.communicate()
-        if recv_stdout:
-            print("Receiver stdout:", recv_stdout.decode())
-        if recv_stderr:
-            print("Receiver stderr:", recv_stderr.decode())
+        # Give it a chance to exit gracefully
+        try:
+            recv_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print("Warning: Receiver not responding, killing...")
+            recv_process.kill()
+            recv_process.wait()
 
 if __name__ == "__main__":
     main()
