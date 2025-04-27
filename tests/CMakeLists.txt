@@ -1,29 +1,37 @@
-# Collect all test source files in current dir
-file(GLOB TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
+# -------- OpenSSL --------
+find_package(OpenSSL 3.0 REQUIRED)
 
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -mconsole")
+# -------- Threads --------
+find_package(Threads REQUIRED)
 
-foreach(test_file ${TEST_SOURCES})
-    get_filename_component(test_name ${test_file} NAME_WE)
+# Define test executables
+set(TEST_EXECUTABLES
+    crypto_tests
+)
 
-    add_executable(${test_name} ${test_file})
-
-    target_include_directories(${test_name} 
-        PRIVATE 
-            ${CMAKE_SOURCE_DIR}/include
-            ${OPENSSL_INCLUDE_DIR}
-    )
-
+# Iterate over each test executable
+foreach(test_name ${TEST_EXECUTABLES})
+    # Add executable
+    add_executable(${test_name} ${test_name}.cpp)
+    
+    # Link libraries
     target_link_libraries(${test_name}
         PRIVATE
-            stx_core
-            gtest
-            gmock
-            gtest_main
-            OpenSSL::SSL 
-            OpenSSL::Crypto
-            Threads::Threads
+        stx-core
+        gtest
+        gtest_main
+        gmock
+        Threads::Threads
+        OpenSSL::SSL
+        OpenSSL::Crypto
     )
-
+    
+    # Include directories
+    target_include_directories(${test_name}
+        PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    
+    # Add test to CTest
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
