@@ -4,9 +4,18 @@ find_package(OpenSSL 3.0 REQUIRED)
 # -------- Threads --------
 find_package(Threads REQUIRED)
 
+# -------- Fetch Asio --------
+FetchContent_Declare(
+  asio
+  GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+  GIT_TAG asio-1-28-0
+)
+FetchContent_MakeAvailable(asio)
+
 # Define test executables
 set(TEST_EXECUTABLES
     crypto_tests
+    protocol_messages_tests  # Add your new test executable here
 )
 
 # Iterate over each test executable
@@ -30,6 +39,7 @@ foreach(test_name ${TEST_EXECUTABLES})
     target_include_directories(${test_name}
         PRIVATE
         ${CMAKE_SOURCE_DIR}/include
+        ${asio_SOURCE_DIR}/asio/include
     )
     
     # Add test to CTest
