@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Basic STX Transfer Test Script
+Simple STX Transfer Test Script
 
 This script:
-1. Generates a 5 MB test file with random data
+1. Generates a test file with random data
 2. Starts stx-recv in the background
 3. Runs stx-send to transfer the file
-4. Verifies the file was transferred correctly using SHA-256 checksums
+4. Verifies the file was transferred correctly
 
 Usage:
-    python basic_test.py
+    python simple_transfer.py
 """
 
 import os
@@ -17,7 +17,6 @@ import sys
 import time
 import subprocess
 import hashlib
-import shutil
 import signal
 import argparse
 from pathlib import Path
@@ -39,29 +38,15 @@ def generate_test_file(file_path, size_mb):
     """Generate a test file with random data."""
     print(f"Generating {size_mb} MB test file at {file_path}...")
     
-    # Determine platform and use appropriate command
-    if sys.platform == 'win32':
-        # Windows - use PowerShell to create a random file
-        size_bytes = size_mb * 1024 * 1024
-        block_size = 64 * 1024  # 64 KB blocks
-        
-        with open(file_path, 'wb') as f:
-            remaining = size_bytes
-            while remaining > 0:
-                chunk_size = min(block_size, remaining)
-                f.write(os.urandom(chunk_size))
-                remaining -= chunk_size
-    else:
-        # Linux/macOS - use dd command
-        block_size = 1024  # 1 KB blocks
-        count = size_mb * 1024
-        
-        subprocess.run(
-            ['dd', 'if=/dev/urandom', f'of={file_path}', 'bs=1K', f'count={count}'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
+    size_bytes = size_mb * 1024 * 1024
+    block_size = 64 * 1024  # 64 KB blocks
+    
+    with open(file_path, 'wb') as f:
+        remaining = size_bytes
+        while remaining > 0:
+            chunk_size = min(block_size, remaining)
+            f.write(os.urandom(chunk_size))
+            remaining -= chunk_size
     
     print(f"Test file generated: {file_path}")
 
@@ -79,6 +64,11 @@ def main():
     # Create the receive directory if it doesn't exist
     os.makedirs(recv_dir, exist_ok=True)
     
+    # Delete existing test files to avoid conflicts
+    received_file = os.path.join(recv_dir, TEST_FILE_NAME)
+    if os.path.exists(received_file):
+        os.remove(received_file)
+    
     # Generate test file
     source_file = TEST_FILE_NAME
     generate_test_file(source_file, size_mb)
@@ -89,38 +79,49 @@ def main():
     
     # Start the receiver in the background
     print(f"Starting stx-recv on port {port}, saving files to {recv_dir}...")
-    recv_process = subprocess.Popen(
-        ['./build/bin/stx-recv', '--listen', str(port), '--out', recv_dir],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
+    recv_cmd = ['./build/bin/stx-recv', '--listen', str(port), '--out', recv_dir]
+    
+    with open('recv_output.log', 'w') as recv_log:
+        recv_process = subprocess.Popen(
+            recv_cmd,
+            stdout=recv_log,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
     
     # Give the receiver time to start
-    time.sleep(2)
+    time.sleep(3)
     
     try:
         # Run the sender
         print(f"Starting stx-send to transfer {source_file}...")
-        sender_result = subprocess.run(
-            ['./build/bin/stx-send', 'localhost', str(port), source_file],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        sender_cmd = ['./build/bin/stx-send', 'localhost', str(port), source_file]
         
-        print("Sender output:")
-        print(sender_result.stdout)
+        with open('send_output.log', 'w') as send_log:
+            sender_result = subprocess.run(
+                sender_cmd,
+                stdout=send_log,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+        
+        # Print sender output
+        with open('send_output.log', 'r') as send_log:
+            print("\n--- Sender Output ---")
+            print(send_log.read())
         
         if sender_result.returncode != 0:
             print(f"Error: stx-send failed with code {sender_result.returncode}")
-            print("Stderr:", sender_result.stderr)
+            # Print receiver output for debugging
+            with open('recv_output.log', 'r') as recv_log:
+                print("\n--- Receiver Output ---")
+                print(recv_log.read())
             sys.exit(1)
         
         # Give the receiver time to finish processing
-        time.sleep(2)
+        time.sleep(3)
         
         # Verify the received file
-        received_file = os.path.join(recv_dir, TEST_FILE_NAME)
         if os.path.exists(received_file):
             received_hash = calculate_sha256(received_file)
             print(f"Received file SHA-256: {received_hash}")
@@ -132,6 +133,9 @@ def main():
                 sys.exit(1)
         else:
             print(f"ERROR: Received file not found at {received_file}")
+            with open('recv_output.log', 'r') as recv_log:
+                print("\n--- Receiver Output ---")
+                print(recv_log.read())
             sys.exit(1)
     
     finally:
@@ -145,14 +149,17 @@ def main():
             recv_process.send_signal(signal.SIGINT)
         
         # Wait for the receiver to exit
-        recv_process.wait(timeout=5)
+        try:
+            recv_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print("Warning: Receiver not responding, killing...")
+            recv_process.kill()
+            recv_process.wait()
         
         # Print receiver output
-        recv_stdout, recv_stderr = recv_process.communicate()
-        if recv_stdout:
-            print("Receiver stdout:", recv_stdout.decode())
-        if recv_stderr:
-            print("Receiver stderr:", recv_stderr.decode())
+        with open('recv_output.log', 'r') as recv_log:
+            print("\n--- Receiver Output ---")
+            print(recv_log.read())
 
 if __name__ == "__main__":
     main()

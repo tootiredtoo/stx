@@ -187,12 +187,61 @@ bool ClientSession::send_file(const std::string& file_path, uint32_t block_size)
     return false;
   }
 
+  // Query server for resume point
+  uint32_t start_block = 0;
+  std::cout << "Querying for resume point..." << std::endl;
+  ResumeQueryMessage resume_query(filename);
+  if (send_message(resume_query)) {
+    // Wait for response
+    auto response = receive_message();
+    if (response && response->type() == MessageType::RESUME_RESPONSE) {
+      ResumeResponseMessage* resume_response = dynamic_cast<ResumeResponseMessage*>(response.get());
+      if (resume_response && resume_response->filename() == filename) {
+        // If the server reports block N as last received, we start from N+1
+        uint32_t last_block = resume_response->last_block_received();
+
+        // If the server reports block 0 and we have at least one block, it means the server
+        // hasn't received any blocks yet, so we should start from block 0
+        if (last_block == 0 && total_blocks > 0) {
+          start_block = 0;
+          std::cout << "Server hasn't received any blocks, starting from the beginning"
+                    << std::endl;
+        } else {
+          // Otherwise, start from the block after the last one the server received
+          start_block = last_block + 1;
+        }
+
+        if (start_block >= total_blocks) {
+          start_block = 0;  // Safety check
+        }
+
+        if (start_block > 0) {
+          std::cout << "Resuming transfer from block " << start_block << "/" << total_blocks << " ("
+                    << std::fixed << std::setprecision(1)
+                    << (static_cast<double>(start_block) / total_blocks * 100.0) << "% complete)"
+                    << std::endl;
+          std::cout << "Skipping " << (start_block * block_size) / (1024 * 1024) << "MB of "
+                    << file_size / (1024 * 1024) << "MB already transferred" << std::endl;
+        }
+      }
+    }
+  }
+
   // Buffer for reading blocks
   std::vector<uint8_t> block_buffer(block_size);
 
   // Send file blocks
-  uint32_t block_index = 0;
+  uint32_t block_index = start_block;
   std::streamsize bytes_read;
+
+  // Seek to the starting position in the file
+  if (start_block > 0) {
+    file.seekg(static_cast<std::streamsize>(start_block) * block_size);
+    if (!file) {
+      std::cerr << "Error: Failed to seek to position " << (start_block * block_size) << std::endl;
+      return false;
+    }
+  }
 
   while (block_index < total_blocks) {
     // Read a block from the file
@@ -233,10 +282,14 @@ bool ClientSession::send_file(const std::string& file_path, uint32_t block_size)
     // Move to the next block
     block_index++;
 
-    // Progress indicator
+    // Progress indicator with more details
     double progress = static_cast<double>(block_index) / total_blocks * 100.0;
-    std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << progress << "% ("
-              << block_index << "/" << total_blocks << " blocks)" << std::flush;
+    double remaining = 100.0 - progress;
+    std::cout << "\rSending: [" << std::string(static_cast<int>(progress / 5), '#')
+              << std::string(static_cast<int>(remaining / 5), ' ') << "] " << std::fixed
+              << std::setprecision(1) << progress << "% (" << block_index << "/" << total_blocks
+              << " blocks, " << (block_index * block_size) / (1024 * 1024) << "MB/"
+              << file_size / (1024 * 1024) << "MB)" << std::flush;
   }
 
   std::cout << std::endl;

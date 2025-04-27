@@ -91,6 +91,8 @@ enum class MessageType : uint8_t {
   FILE_METADATA = 7,
   FILE_BLOCK = 8,
   BLOCK_ACK = 9,
+  RESUME_QUERY = 10,
+  RESUME_RESPONSE = 11,
   ERROR_MSG = 255
 };
 
@@ -298,40 +300,62 @@ class BlockAckMessage : public Message {
   bool success_;
 };
 
-// Server Session class declaration
+class ResumeQueryMessage : public Message {
+ public:
+  ResumeQueryMessage() = default;
+  explicit ResumeQueryMessage(const std::string& filename);
+
+  MessageType type() const override { return MessageType::RESUME_QUERY; }
+  std::vector<uint8_t> serialize() const override;
+  void deserialize(const std::vector<uint8_t>& data) override;
+
+  const std::string& filename() const { return filename_; }
+
+ private:
+  std::string filename_;
+};
+
+class ResumeResponseMessage : public Message {
+ public:
+  ResumeResponseMessage() = default;
+  ResumeResponseMessage(const std::string& filename, uint32_t last_block_received);
+
+  MessageType type() const override { return MessageType::RESUME_RESPONSE; }
+  std::vector<uint8_t> serialize() const override;
+  void deserialize(const std::vector<uint8_t>& data) override;
+
+  const std::string& filename() const { return filename_; }
+  uint32_t last_block_received() const { return last_block_received_; }
+
+ private:
+  std::string filename_;
+  uint32_t last_block_received_;
+};
+
 class ServerSession {
  public:
-  // Constructor takes an Asio socket
   explicit ServerSession(std::shared_ptr<asio::ip::tcp::socket> socket);
 
-  // Destructor
   ~ServerSession();
 
-  // Prevent copying
   ServerSession(const ServerSession&) = delete;
   ServerSession& operator=(const ServerSession&) = delete;
 
-  // Message handling
   bool send_message(const Message& message);
   std::unique_ptr<Message> receive_message();
 
-  // File transfer
   bool send_file(const std::string& file_path, uint32_t block_size = 1024 * 1024);
   bool receive_file(const std::string& output_dir);
 
-  // Handshake functions
   bool client_handshake();  // Not used by servers
   bool server_handshake();
 
-  // Session management
   void close();
   bool is_active() const;
 
-  // Encryption utilities
   bool encrypt_and_send(const std::vector<uint8_t>& data);
   std::vector<uint8_t> receive_and_decrypt();
 
-  // Get client ID
   const std::string& client_id() const { return client_id_; }
 
  private:
@@ -341,7 +365,7 @@ class ServerSession {
   crypto::SessionId session_id_;
   crypto::Key session_key_;
   crypto::IV current_iv_;
-  std::map<uint32_t, bool> received_blocks_;  // Tracks received file blocks
+  std::map<uint32_t, bool> received_blocks_; 
 };
 
 // Factory functions to create sessions

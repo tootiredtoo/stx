@@ -421,6 +421,10 @@ std::unique_ptr<Message> create_message(MessageType type) {
       return std::make_unique<FileBlockMessage>();
     case MessageType::BLOCK_ACK:
       return std::make_unique<BlockAckMessage>();
+    case MessageType::RESUME_QUERY:
+      return std::make_unique<ResumeQueryMessage>();
+    case MessageType::RESUME_RESPONSE:
+      return std::make_unique<ResumeResponseMessage>();
     default:
       return nullptr;
   }
@@ -452,6 +456,58 @@ std::unique_ptr<Message> parse_message(const std::vector<uint8_t>& data) {
   message->deserialize(std::vector<uint8_t>(data.begin() + 5, data.end()));
 
   return message;
+}
+
+// Add these implementations to your src/protocols/protocol_messages.cpp file at the end,
+// right before the closing namespace brackets.
+
+// ResumeQueryMessage implementation
+ResumeQueryMessage::ResumeQueryMessage(const std::string& filename) : filename_(filename) {}
+
+std::vector<uint8_t> ResumeQueryMessage::serialize() const {
+  return serialize_string(filename_);
+}
+
+void ResumeQueryMessage::deserialize(const std::vector<uint8_t>& data) {
+  size_t pos = 0;
+  filename_ = deserialize_string(data, pos);
+}
+
+// ResumeResponseMessage implementation
+ResumeResponseMessage::ResumeResponseMessage(const std::string& filename,
+                                             uint32_t last_block_received)
+    : filename_(filename), last_block_received_(last_block_received) {}
+
+std::vector<uint8_t> ResumeResponseMessage::serialize() const {
+  std::vector<uint8_t> result;
+
+  // Add filename
+  std::vector<uint8_t> filename_data = serialize_string(filename_);
+  result.insert(result.end(), filename_data.begin(), filename_data.end());
+
+  // Add last block received
+  result.push_back((last_block_received_ >> 24) & 0xFF);
+  result.push_back((last_block_received_ >> 16) & 0xFF);
+  result.push_back((last_block_received_ >> 8) & 0xFF);
+  result.push_back(last_block_received_ & 0xFF);
+
+  return result;
+}
+
+void ResumeResponseMessage::deserialize(const std::vector<uint8_t>& data) {
+  size_t pos = 0;
+
+  // Extract filename
+  filename_ = deserialize_string(data, pos);
+
+  // Extract last block received
+  if (pos + 4 > data.size()) {
+    throw std::runtime_error("Not enough data to deserialize last_block_received");
+  }
+
+  last_block_received_ =
+      (static_cast<uint32_t>(data[pos]) << 24) | (static_cast<uint32_t>(data[pos + 1]) << 16) |
+      (static_cast<uint32_t>(data[pos + 2]) << 8) | static_cast<uint32_t>(data[pos + 3]);
 }
 
 }  // namespace protocol

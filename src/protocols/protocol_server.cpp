@@ -111,128 +111,270 @@ bool ServerSession::receive_file(const std::string& output_dir) {
     std::cout << "Block size: " << metadata.block_size << " bytes" << std::endl;
     std::cout << "Total blocks: " << metadata.total_blocks << std::endl;
 
-    // Construct output file path
+    // Construct output file path - this will be our primary file path
     std::filesystem::path output_path = std::filesystem::path(output_dir) / metadata.filename;
 
-    // Check if the file already exists and has the same size (for resume)
+    // Determine if we should resume or create a new file
     bool resuming = false;
     uint32_t next_block = 0;
 
+    // Clear any previous received_blocks_ data
+    received_blocks_.clear();
+
+    // Check if the file already exists
     if (std::filesystem::exists(output_path)) {
       std::uintmax_t existing_size = std::filesystem::file_size(output_path);
 
-      // If file exists but with different size, rename with timestamp
-      if (existing_size != metadata.filesize) {
+      // If the file size matches exactly what we expect, try to resume
+      if (existing_size == metadata.filesize) {
+        resuming = true;
+        next_block = 0;  // Start conservatively from the beginning
+
+        std::cout << "Found existing file with matching size. Attempting to resume." << std::endl;
+      }
+      // If the file exists but is smaller, it might be an incomplete transfer
+      else if (existing_size < metadata.filesize && existing_size > 0) {
+        // Calculate how many complete blocks we have
+        next_block = static_cast<uint32_t>(existing_size / metadata.block_size);
+
+        if (next_block > 0 && next_block < metadata.total_blocks) {
+          resuming = true;
+          std::cout << "Found partially transferred file. Resuming from block " << next_block
+                    << std::endl;
+        } else {
+          // If the file is too small or has inconsistent block count, start over
+          resuming = false;
+          next_block = 0;
+          std::cout
+              << "Found incomplete file but can't determine valid resume point. Starting over."
+              << std::endl;
+        }
+      }
+      // If the file is larger than expected or zero size, create a new file
+      else {
+        resuming = false;
+        next_block = 0;
+        std::cout << "Existing file has different size. Creating new file." << std::endl;
+      }
+    }
+
+    // For the resume case, we'll use the existing file
+    // For the non-resume case, we need to decide whether to overwrite or create a new file
+    std::ofstream outfile;
+
+    if (!resuming) {
+      // If we're not resuming and the file exists, rename it with a timestamp
+      if (std::filesystem::exists(output_path)) {
         auto now = std::chrono::system_clock::now();
         auto timestamp =
             std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
 
         std::filesystem::path new_path = output_path;
-        new_path.replace_filename(metadata.filename + "_" + std::to_string(timestamp) +
-                                  output_path.extension().string());
-        output_path = new_path;
+        std::string filename_base = metadata.filename;
+        std::string extension = "";
 
-        std::cout << "File with same name exists but different size. "
-                  << "Saving as: " << output_path.filename().string() << std::endl;
-      } else {
-        // File exists with same size, check if we can resume
-        resuming = true;
-        // Calculate the number of complete blocks already received
-        next_block = static_cast<uint32_t>(existing_size / metadata.block_size);
-        if (next_block >= metadata.total_blocks) {
-          next_block = 0;  // Start from beginning if something is wrong
-          resuming = false;
+        // Extract filename and extension
+        size_t dot_pos = metadata.filename.find_last_of('.');
+        if (dot_pos != std::string::npos) {
+          filename_base = metadata.filename.substr(0, dot_pos);
+          extension = metadata.filename.substr(dot_pos);
         }
 
-        std::cout << "Resuming file transfer from block " << next_block << std::endl;
+        new_path = std::filesystem::path(output_dir) /
+                   (filename_base + "_" + std::to_string(timestamp) + extension);
+
+        // Safely rename the file to avoid overwriting
+        try {
+          std::filesystem::rename(output_path, new_path);
+          std::cout << "Renamed existing file to: " << new_path.filename().string() << std::endl;
+        } catch (const std::exception& e) {
+          std::cerr << "Warning: Could not rename existing file: " << e.what() << std::endl;
+          // If rename fails, we'll still try to create a new file
+        }
+      }
+
+      // Create a new file
+      outfile.open(output_path, std::ios::binary | std::ios::trunc);
+      if (!outfile) {
+        std::cerr << "Error: Failed to create output file: " << output_path << std::endl;
+        return false;
+      }
+
+      std::cout << "Created new file: " << output_path.filename().string() << std::endl;
+    } else {
+      // Open existing file for update
+      outfile.open(output_path, std::ios::binary | std::ios::in | std::ios::out);
+
+      if (!outfile) {
+        std::cerr << "Error: Failed to open existing file for resume: " << output_path << std::endl;
+        // If we can't open it for resume, try creating a new file
+        outfile.open(output_path, std::ios::binary | std::ios::trunc);
+        if (!outfile) {
+          std::cerr << "Error: Also failed to create new file: " << output_path << std::endl;
+          return false;
+        }
+        resuming = false;
+        next_block = 0;
+      } else {
+        std::cout << "Successfully opened file for resume: " << output_path.filename().string()
+                  << std::endl;
+
+        // Initialize received blocks map for already received blocks
+        for (uint32_t i = 0; i < next_block; ++i) {
+          received_blocks_[i] = true;
+        }
       }
     }
 
-    // Open the output file
-    std::ofstream outfile;
-    if (resuming) {
-      outfile.open(output_path, std::ios::binary | std::ios::in | std::ios::out);
-      outfile.seekp(next_block * metadata.block_size);
-    } else {
-      outfile.open(output_path, std::ios::binary | std::ios::out);
-    }
+    // Set our initial received count based on resume state
+    uint32_t received_count = next_block;
 
-    if (!outfile) {
-      std::cerr << "Error: Failed to open output file: " << output_path << std::endl;
-      return false;
-    }
+    // Handle resume query if it comes next
+    auto next_msg = receive_message();
+    if (next_msg && next_msg->type() == MessageType::RESUME_QUERY) {
+      ResumeQueryMessage* query = dynamic_cast<ResumeQueryMessage*>(next_msg.get());
+      std::string requested_filename = query->filename();
 
-    // Initialize received blocks map (for potential resume)
-    for (uint32_t i = 0; i < next_block; ++i) {
-      received_blocks_[i] = true;
+      // Report our highest consecutive block
+      uint32_t last_received_block = next_block > 0 ? (next_block - 1) : 0;
+
+      std::cout << "Received resume query for file: " << requested_filename
+                << ". Reporting last block: " << last_received_block << "/" << metadata.total_blocks
+                << " (" << std::fixed << std::setprecision(1)
+                << ((static_cast<double>(last_received_block + 1) / metadata.total_blocks) * 100.0)
+                << "% complete)" << std::endl;
+
+      // Send resume response
+      ResumeResponseMessage response(requested_filename, last_received_block);
+      if (!send_message(response)) {
+        std::cerr << "Error: Failed to send resume response" << std::endl;
+        outfile.close();
+        return false;
+      }
+
+      // Get the next message
+      next_msg = receive_message();
     }
 
     // Receive file blocks
-    uint32_t received_count = next_block;
+    bool transfer_interrupted = false;
 
     while (received_count < metadata.total_blocks) {
-      // Receive block
-      auto block_msg_ptr = receive_message();
-      if (!block_msg_ptr || block_msg_ptr->type() != MessageType::FILE_BLOCK) {
-        std::cerr << "Error: Expected FILE_BLOCK message" << std::endl;
-        return false;
-      }
-
-      FileBlockMessage* block_msg = dynamic_cast<FileBlockMessage*>(block_msg_ptr.get());
-      uint32_t block_index = block_msg->block_index();
-      const std::vector<uint8_t>& block_data = block_msg->block_data();
-      uint32_t block_checksum = block_msg->checksum();
-
-      // Verify block checksum
-      uint32_t computed_checksum = crypto::calculate_crc32(block_data);
-      bool checksum_valid = (computed_checksum == block_checksum);
-
-      // Send acknowledgment
-      BlockAckMessage ack(block_index, checksum_valid);
-      if (!send_message(ack)) {
-        std::cerr << "Error: Failed to send block acknowledgment" << std::endl;
-        return false;
-      }
-
-      // If checksum is valid, write block to file
-      if (checksum_valid) {
-        // Seek to the correct position for this block
-        outfile.seekp(block_index * metadata.block_size);
-
-        // Write block data
-        outfile.write(reinterpret_cast<const char*>(block_data.data()), block_data.size());
-        if (!outfile) {
-          std::cerr << "Error: Failed to write block " << block_index << " to file" << std::endl;
-          return false;
+      // Use the next_msg if we have one from resume query handling, otherwise receive new message
+      std::unique_ptr<Message> block_msg_ptr;
+      try {
+        if (next_msg) {
+          block_msg_ptr = std::move(next_msg);
+          next_msg = nullptr;
+        } else {
+          block_msg_ptr = receive_message();
         }
 
-        // Mark block as received
-        received_blocks_[block_index] = true;
+        if (!block_msg_ptr) {
+          std::cerr << "Error: Failed to receive message, connection may have been lost"
+                    << std::endl;
+          transfer_interrupted = true;
+          break;
+        }
 
-        // Update received count if this is the next expected block
-        if (block_index == received_count) {
-          received_count++;
+        if (block_msg_ptr->type() != MessageType::FILE_BLOCK) {
+          std::cerr << "Error: Expected FILE_BLOCK message, got type: "
+                    << static_cast<int>(block_msg_ptr->type()) << std::endl;
+          continue;  // Try the next message
+        }
 
-          // Check for any subsequent blocks that were already received
-          while (received_blocks_.count(received_count) > 0 && received_blocks_[received_count]) {
-            received_count++;
+        FileBlockMessage* block_msg = dynamic_cast<FileBlockMessage*>(block_msg_ptr.get());
+        uint32_t block_index = block_msg->block_index();
+        const std::vector<uint8_t>& block_data = block_msg->block_data();
+        uint32_t block_checksum = block_msg->checksum();
+
+        // Verify block checksum
+        uint32_t computed_checksum = crypto::calculate_crc32(block_data);
+        bool checksum_valid = (computed_checksum == block_checksum);
+
+        // Send acknowledgment
+        BlockAckMessage ack(block_index, checksum_valid);
+        if (!send_message(ack)) {
+          std::cerr << "Error: Failed to send block acknowledgment" << std::endl;
+          transfer_interrupted = true;
+          break;
+        }
+
+        // If checksum is valid, write block to file
+        if (checksum_valid) {
+          // Seek to the correct position for this block
+          std::streampos block_pos = static_cast<std::streampos>(block_index) * metadata.block_size;
+          outfile.seekp(block_pos);
+
+          if (!outfile) {
+            std::cerr << "Error: Failed to seek to position " << block_pos << " for block "
+                      << block_index << std::endl;
+            continue;  // Try next block
           }
-        }
-      }
 
-      // Progress indicator
-      double progress = static_cast<double>(received_count) / metadata.total_blocks * 100.0;
-      std::cout << "\rProgress: " << std::fixed << std::setprecision(1) << progress << "% ("
-                << received_count << "/" << metadata.total_blocks << " blocks)" << std::flush;
+          // Write block data
+          outfile.write(reinterpret_cast<const char*>(block_data.data()), block_data.size());
+          outfile.flush();  // Flush after each block for safety
+
+          if (!outfile) {
+            std::cerr << "Error: Failed to write block " << block_index << " to file" << std::endl;
+            continue;  // Try next block
+          }
+
+          // Mark block as received
+          received_blocks_[block_index] = true;
+
+          // Update received count if this was the next expected block
+          if (block_index == received_count) {
+            received_count++;
+
+            // Check for any subsequent blocks that were already received
+            while (received_blocks_.count(received_count) > 0 && received_blocks_[received_count]) {
+              received_count++;
+            }
+          }
+        } else {
+          std::cerr << "Error: Checksum mismatch for block " << block_index << std::endl;
+        }
+
+        // Progress indicator with more details
+        double progress = static_cast<double>(received_count) / metadata.total_blocks * 100.0;
+        double remaining = 100.0 - progress;
+        std::cout << "\rReceiving: [" << std::string(static_cast<int>(progress / 5), '#')
+                  << std::string(static_cast<int>(remaining / 5), ' ') << "] " << std::fixed
+                  << std::setprecision(1) << progress << "% (" << received_count << "/"
+                  << metadata.total_blocks << " blocks, "
+                  << (received_count * metadata.block_size) / (1024 * 1024) << "MB/"
+                  << metadata.filesize / (1024 * 1024) << "MB)" << std::flush;
+      } catch (const std::exception& e) {
+        std::cerr << "Error during block reception: " << e.what() << std::endl;
+        transfer_interrupted = true;
+        break;
+      }
     }
 
+    // End the progress line
     std::cout << std::endl;
-    std::cout << "File received successfully: " << output_path << std::endl;
 
-    // Close the file
+    // Make sure to flush and close the file
+    outfile.flush();
     outfile.close();
 
-    return true;
+    // Check if we completed or were interrupted
+    if (received_count >= metadata.total_blocks) {
+      std::cout << "File received successfully: " << output_path << std::endl;
+      return true;
+    } else if (transfer_interrupted) {
+      std::cout << "File transfer interrupted. Received " << received_count << " of "
+                << metadata.total_blocks << " blocks (" << std::fixed << std::setprecision(1)
+                << (static_cast<double>(received_count) / metadata.total_blocks * 100.0)
+                << "%). File can be resumed later." << std::endl;
+      return true;  // Return true so we don't consider this a failure
+    } else {
+      std::cerr << "Error: Transfer incomplete but not interrupted" << std::endl;
+      return false;
+    }
+
   } catch (const std::exception& e) {
     std::cerr << "Error receiving file: " << e.what() << std::endl;
     return false;
