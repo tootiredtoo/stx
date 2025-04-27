@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include "crypto/crypto.hpp"
+#include "socket.hpp"
 
 namespace stx {
 namespace protocol {
@@ -17,9 +18,13 @@ namespace protocol {
 enum class MessageType : uint8_t;
 class Message;
 
-// Helper functions for socket I/O
+// Helper functions for socket I/O - original versions for backward compatibility
 std::vector<uint8_t> read_from_socket(asio::ip::tcp::socket& socket, size_t length);
 bool write_to_socket(asio::ip::tcp::socket& socket, const std::vector<uint8_t>& data);
+
+// New versions of helper functions that work with the ISocket interface
+std::vector<uint8_t> read_from_socket(ISocket& socket, size_t length);
+bool write_to_socket(ISocket& socket, const std::vector<uint8_t>& data);
 
 // File metadata structure
 struct FileMetadata {
@@ -34,8 +39,8 @@ struct FileMetadata {
 // Client Session class declaration
 class ClientSession {
  public:
-  // Constructor takes an Asio socket
-  explicit ClientSession(std::shared_ptr<asio::ip::tcp::socket> socket);
+  // Constructor
+  explicit ClientSession(std::shared_ptr<ISocket> socket);
 
   // Destructor
   ~ClientSession();
@@ -68,7 +73,7 @@ class ClientSession {
   const std::string& client_id() const { return client_id_; }
 
  private:
-  std::shared_ptr<asio::ip::tcp::socket> socket_;
+  std::shared_ptr<ISocket> socket_;
   bool active_;
   std::string client_id_;
   crypto::SessionId session_id_;
@@ -334,7 +339,7 @@ class ResumeResponseMessage : public Message {
 
 class ServerSession {
  public:
-  explicit ServerSession(std::shared_ptr<asio::ip::tcp::socket> socket);
+  explicit ServerSession(std::shared_ptr<ISocket> socket);
 
   ~ServerSession();
 
@@ -359,13 +364,13 @@ class ServerSession {
   const std::string& client_id() const { return client_id_; }
 
  private:
-  std::shared_ptr<asio::ip::tcp::socket> socket_;
+  std::shared_ptr<ISocket> socket_;
   bool active_;
   std::string client_id_;
   crypto::SessionId session_id_;
   crypto::Key session_key_;
   crypto::IV current_iv_;
-  std::map<uint32_t, bool> received_blocks_; 
+  std::map<uint32_t, bool> received_blocks_;
 };
 
 // Factory functions to create sessions

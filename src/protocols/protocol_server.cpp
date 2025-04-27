@@ -10,8 +10,8 @@ namespace stx {
 namespace protocol {
 
 // ServerSession implementation
-ServerSession::ServerSession(std::shared_ptr<asio::ip::tcp::socket> socket)
-    : socket_(socket), active_(socket && socket->is_open()) {
+ServerSession::ServerSession(std::shared_ptr<ISocket> socket)
+    : socket_(std::move(socket)), active_(socket && socket->is_open()) {
   // Initialize with random values until the handshake
   current_iv_ = crypto::generate_iv();
 }
@@ -675,13 +675,16 @@ std::unique_ptr<ServerSession> accept_server_session(
 
   try {
     // Create a socket for the new connection
-    auto socket = std::make_shared<asio::ip::tcp::socket>(acceptor->get_executor());
+    auto asio_socket = std::make_shared<asio::ip::tcp::socket>(acceptor->get_executor());
 
     // Accept a connection
-    acceptor->accept(*socket);
+    acceptor->accept(*asio_socket);
 
-    std::cout << "Accepted connection from " << socket->remote_endpoint().address().to_string()
-              << ":" << socket->remote_endpoint().port() << std::endl;
+    std::cout << "Accepted connection from " << asio_socket->remote_endpoint().address().to_string()
+              << ":" << asio_socket->remote_endpoint().port() << std::endl;
+
+    // Wrap the ASIO socket in our interface
+    auto socket = std::make_shared<AsioSocket>(asio_socket);
 
     // Create and return a server session with the connected socket
     return std::make_unique<ServerSession>(socket);
@@ -690,6 +693,5 @@ std::unique_ptr<ServerSession> accept_server_session(
     return nullptr;
   }
 }
-
 }  // namespace protocol
 }  // namespace stx

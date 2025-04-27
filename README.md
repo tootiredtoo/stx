@@ -83,12 +83,12 @@ This sends the file "document.pdf" to a receiver running on the local machine at
 
 STX includes integration test scripts to verify that file transfers work correctly:
 
-```bash
+```python
 # Basic transfer test
-./test_transfer.sh
+py ./scripts/one_file_transfer.py
 
 # Resume capability test
-./test_resume.sh
+py ./scripts/transfer_with_disconnects.py
 ```
 
 ## Error Codes

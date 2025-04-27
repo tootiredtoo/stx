@@ -9,7 +9,7 @@
 #include <vector>
 #include "crypto/crypto.hpp"
 #include "protocols/protocol.hpp"
-
+#include "protocols/socket.hpp"
 
 // Default listen port
 constexpr uint16_t DEFAULT_PORT = 12345;
@@ -53,8 +53,11 @@ void handle_client(std::shared_ptr<asio::ip::tcp::socket> client_socket,
     std::cerr << "Error getting client information: " << e.what() << std::endl;
   }
 
-  // Create a server session
-  auto session = std::make_unique<stx::protocol::ServerSession>(client_socket);
+  // Wrap the ASIO socket in our ISocket interface
+  auto socket_wrapper = std::make_shared<AsioSocket>(client_socket);
+
+  // Create a server session with the wrapped socket
+  auto session = std::make_unique<stx::protocol::ServerSession>(socket_wrapper);
 
   // Perform the handshake
   if (!session->server_handshake()) {
@@ -176,26 +179,22 @@ int main(int argc, char* argv[]) {
         });
 
         // Prepare for async accept
-        auto session = stx::protocol::accept_server_session(acceptor);
+        auto raw_socket = std::make_shared<asio::ip::tcp::socket>(io_context);
 
-        // If we have a valid session, handle it in a new thread
-        if (session) {
-          // Handle client in separate thread
-          client_threads.emplace_back([session = std::move(session), output_dir]() mutable {
-            try {
-              // Handshake and receive file
-              if (session->server_handshake()) {
-                session->receive_file(output_dir);
-              }
-              session->close();
-            } catch (const std::exception& e) {
-              std::cerr << "Error in client thread: " << e.what() << std::endl;
-            }
-          });
+        // Accept a connection
+        acceptor->async_accept(*raw_socket, [&](const asio::error_code& error) {
+          if (!error) {
+            // Handle client in separate thread
+            client_threads.emplace_back(
+                [socket = raw_socket, output_dir]() mutable { handle_client(socket, output_dir); });
 
-          // Detach the thread as we don't need to wait for it
-          client_threads.back().detach();
-        }
+            // Detach the thread as we don't need to wait for it
+            client_threads.back().detach();
+          }
+        });
+
+        // Run the io_context until the timer or accept completes
+        io_context.run();
       } catch (const asio::system_error& e) {
         if (e.code() == asio::error::operation_aborted) {
           // This is expected when we cancel during shutdown

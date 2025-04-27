@@ -11,69 +11,9 @@
 namespace stx {
 namespace protocol {
 
-// Helper function to read data from socket using Asio
-std::vector<uint8_t> read_from_socket(asio::ip::tcp::socket& socket, size_t length) {
-  std::vector<uint8_t> buffer(length);
-  size_t total_read = 0;
-
-  while (total_read < length) {
-    try {
-      asio::error_code ec;
-      size_t bytes_read =
-          asio::read(socket, asio::buffer(buffer.data() + total_read, length - total_read),
-                     asio::transfer_at_least(1), ec);
-
-      if (ec) {
-        throw std::runtime_error("Connection closed or error while reading: " + ec.message());
-      }
-
-      if (bytes_read == 0) {
-        throw std::runtime_error("Connection closed while reading");
-      }
-
-      total_read += bytes_read;
-    } catch (const std::exception& e) {
-      throw std::runtime_error(std::string("Error reading from socket: ") + e.what());
-    }
-  }
-
-  return buffer;
-}
-
-// Helper function to write data to socket using Asio
-bool write_to_socket(asio::ip::tcp::socket& socket, const std::vector<uint8_t>& data) {
-  try {
-    size_t total_sent = 0;
-
-    while (total_sent < data.size()) {
-      asio::error_code ec;
-      size_t bytes_sent =
-          asio::write(socket, asio::buffer(data.data() + total_sent, data.size() - total_sent),
-                      asio::transfer_at_least(1), ec);
-
-      if (ec) {
-        std::cerr << "Error writing to socket: " << ec.message() << std::endl;
-        return false;
-      }
-
-      if (bytes_sent == 0) {
-        std::cerr << "Connection closed while writing" << std::endl;
-        return false;
-      }
-
-      total_sent += bytes_sent;
-    }
-
-    return true;
-  } catch (const std::exception& e) {
-    std::cerr << "Error writing to socket: " << e.what() << std::endl;
-    return false;
-  }
-}
-
 // ClientSession implementation
-ClientSession::ClientSession(std::shared_ptr<asio::ip::tcp::socket> socket)
-    : socket_(socket), active_(socket && socket->is_open()) {
+ClientSession::ClientSession(std::shared_ptr<ISocket> socket)
+    : socket_(std::move(socket)), active_(socket && socket->is_open()) {
   // Initialize with random values until the handshake
   current_iv_ = crypto::generate_iv();
 }
@@ -81,6 +21,10 @@ ClientSession::ClientSession(std::shared_ptr<asio::ip::tcp::socket> socket)
 ClientSession::~ClientSession() {
   close();
 }
+
+// Modify the following parts in protocol_client.cpp
+
+// Modify send_message method to use ISocket
 
 bool ClientSession::send_message(const Message& message) {
   try {
@@ -117,6 +61,8 @@ bool ClientSession::send_message(const Message& message) {
     return false;
   }
 }
+
+// Modify receive_message method to use ISocket
 
 std::unique_ptr<Message> ClientSession::receive_message() {
   try {
@@ -539,11 +485,120 @@ std::unique_ptr<ClientSession> create_client_session(const std::string& host, ui
       }
     }).detach();
 
-    // Create client session
-    return std::make_unique<ClientSession>(socket);
+    // Create client session, passing AsioSocket (which implements ISocket)
+    std::shared_ptr<ISocket> wrapped_socket = std::make_shared<AsioSocket>(socket);
+
+    return std::make_unique<ClientSession>(wrapped_socket);  // Pass the interface
   } catch (const std::exception& e) {
     std::cerr << "Error creating client session: " << e.what() << std::endl;
     return nullptr;
+  }
+}
+
+// Helper function to read data from socket with specified length
+std::vector<uint8_t> read_from_socket(asio::ip::tcp::socket& socket, size_t length) {
+  std::vector<uint8_t> buffer(length);
+  size_t total_read = 0;
+
+  while (total_read < length) {
+    asio::error_code ec;
+    size_t bytes_read =
+        socket.read_some(asio::buffer(buffer.data() + total_read, length - total_read), ec);
+
+    if (ec) {
+      throw std::runtime_error("Connection closed or error while reading: " + ec.message());
+    }
+
+    if (bytes_read == 0) {
+      throw std::runtime_error("Connection closed while reading");
+    }
+
+    total_read += bytes_read;
+  }
+
+  return buffer;
+}
+
+// Helper function to read data from ISocket with specified length
+std::vector<uint8_t> read_from_socket(ISocket& socket, size_t length) {
+  std::vector<uint8_t> buffer(length);
+  size_t total_read = 0;
+
+  while (total_read < length) {
+    try {
+      asio::error_code ec;
+      size_t bytes_read =
+          socket.read_some(asio::buffer(buffer.data() + total_read, length - total_read), ec);
+
+      if (ec) {
+        throw std::runtime_error("Connection closed or error while reading: " + ec.message());
+      }
+
+      if (bytes_read == 0) {
+        throw std::runtime_error("Connection closed while reading");
+      }
+
+      total_read += bytes_read;
+    } catch (const std::exception& e) {
+      throw std::runtime_error(std::string("Error reading from socket: ") + e.what());
+    }
+  }
+
+  return buffer;
+}
+
+// Helper function to write data to socket
+bool write_to_socket(asio::ip::tcp::socket& socket, const std::vector<uint8_t>& data) {
+  try {
+    size_t total_sent = 0;
+
+    while (total_sent < data.size()) {
+      asio::error_code ec;
+      size_t bytes_sent =
+          asio::write(socket, asio::buffer(data.data() + total_sent, data.size() - total_sent),
+                      asio::transfer_at_least(1), ec);
+
+      if (ec) {
+        std::cerr << "Error writing to socket: " << ec.message() << std::endl;
+        return false;
+      }
+
+      if (bytes_sent == 0) {
+        std::cerr << "Connection closed while writing" << std::endl;
+        return false;
+      }
+
+      total_sent += bytes_sent;
+    }
+
+    return true;
+  } catch (const std::exception& e) {
+    std::cerr << "Error writing to socket: " << e.what() << std::endl;
+    return false;
+  }
+}
+
+// Helper function to write data to ISocket
+bool write_to_socket(ISocket& socket, const std::vector<uint8_t>& data) {
+  try {
+    size_t total_sent = 0;
+
+    while (total_sent < data.size()) {
+      size_t bytes_sent =
+          socket.send(asio::buffer(data.data() + total_sent, data.size() - total_sent));
+
+      if (bytes_sent == 0) {
+        std::cerr << "Connection closed while writing" << std::endl;
+        return false;
+      }
+
+      total_sent += bytes_sent;
+    }
+
+    return true;
+  } catch (const std::exception& e) {
+    std::cerr << "Error writing to socket: " << e.what() << std::endl;
+    return false;
   }
 }
 

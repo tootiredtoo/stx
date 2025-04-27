@@ -15,7 +15,8 @@ FetchContent_MakeAvailable(asio)
 # Define test executables
 set(TEST_EXECUTABLES
     crypto_tests
-    protocol_messages_tests  # Add your new test executable here
+    protocol_messages_tests 
+    protocol_client_tests
 )
 
 # Iterate over each test executable
