@@ -17,6 +17,7 @@ set(TEST_EXECUTABLES
     crypto_tests
     protocol_messages_tests 
     protocol_client_tests
+    protocol_server_tests
 )
 
 # Iterate over each test executable
